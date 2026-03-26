@@ -2,10 +2,10 @@
   "name": "decode-js",
   "type": "module",
   "scripts": {
-    "decode": "node src/main.js",
-    "deob": "node src/main.js -t obfuscator",
-    "deso": "node src/main.js -t sojson",
-    "desov7": "node src/main.js -t sojsonv7",
+    "decode": "node --max-old-space-size=16384 --expose-gc src/main.js",
+    "deob": "node --max-old-space-size=16384 --expose-gc src/main.js -t obfuscator",
+    "deso": "node --max-old-space-size=16384 --expose-gc src/main.js -t sojson",
+    "desov7": "node --max-old-space-size=16384 --expose-gc src/main.js -t sojsonv7",
     "test": "vitest --config vitest.config.js",
     "lint": "eslint --ext .js --fix src"
   },

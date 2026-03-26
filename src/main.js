@@ -25,29 +25,29 @@ console.log(`类型: ${type}`)
 console.log(`输入: ${encodeFile}`)
 console.log(`输出: ${decodeFile}`)
 
-const main = () => {
-  // 读取源代码
-  const sourceCode = fs.readFileSync(encodeFile, { encoding: 'utf-8' })
+const plugins = {
+  sojson: PluginSojson,
+  sojsonv7: PluginSojsonV7,
+  obfuscator: PluginObfuscator,
+  awsc: PluginAwsc,
+  jjencode: PluginJjencode,
+}
 
-  // 净化源代码
-  let code
-  if (type === 'sojson') {
-    code = PluginSojson(sourceCode)
-  } else if (type === 'sojsonv7') {
-    code = PluginSojsonV7(sourceCode)
-  } else if (type === 'obfuscator') {
-    code = PluginObfuscator(sourceCode)
-  } else if (type === 'awsc') {
-    code = PluginAwsc(sourceCode)
-  } else if (type === 'jjencode') {
-    code = PluginJjencode(sourceCode)
-  } else {
-    code = PluginCommon(sourceCode)
+const main = () => {
+  let sourceCode = fs.readFileSync(encodeFile, { encoding: 'utf-8' })
+  console.log(`文件大小: ${(Buffer.byteLength(sourceCode) / 1024 / 1024).toFixed(1)} MB`)
+
+  const plugin = plugins[type] || PluginCommon
+  const code = plugin(sourceCode)
+
+  sourceCode = null
+  if (typeof globalThis.gc === 'function') {
+    globalThis.gc()
   }
 
-  // 输出代码
   if (code) {
-    fs.writeFile(decodeFile, code, () => {})
+    fs.writeFileSync(decodeFile, code)
+    console.log(`输出完成: ${decodeFile}`)
   }
 }
 

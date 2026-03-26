@@ -12,7 +12,6 @@ import * as t from '@babel/types'
 import ivm from 'isolated-vm'
 import PluginEval from './eval.js'
 import calculateConstantExp from '../visitor/calculate-constant-exp.js'
-import deleteIllegalReturn from '../visitor/delete-illegal-return.js'
 import deleteUnusedVar from '../visitor/delete-unused-var.js'
 import lintIfStatement from '../visitor/lint-if-statement.js'
 import mergeObject from '../visitor/merge-object.js'
@@ -23,10 +22,16 @@ import splitAssignment from '../visitor/split-assignment.js'
 import splitSequence from '../visitor/split-sequence.js'
 import splitVarDeclaration from '../visitor/split-variable-declaration.js'
 
-const isolate = new ivm.Isolate()
+const isolate = new ivm.Isolate({ memoryLimit: 512 })
 const globalContext = isolate.createContextSync()
 function virtualGlobalEval(jsStr) {
   return globalContext.evalSync(String(jsStr))
+}
+
+function tryGC() {
+  if (typeof globalThis.gc === 'function') {
+    globalThis.gc()
+  }
 }
 
 const optGenMin = {
@@ -78,11 +83,15 @@ function decodeObject(ast) {
         safe = false
         continue
       }
-      if (Object.prototype.hasOwnProperty.call(obj, key.name)) {
-        parent.replaceWith(obj[key.name])
-      } else {
+      if (!Object.prototype.hasOwnProperty.call(obj, key.name)) {
         safe = false
+        continue
       }
+      if (parent.parentPath.isAssignmentExpression() && parent.key === 'left') {
+        safe = false
+        continue
+      }
+      parent.replaceWith(t.cloneNode(obj[key.name]))
     }
     bind.scope.crawl()
     if (safe) {
@@ -241,6 +250,11 @@ function stringArrayV2(ast) {
     obj.stringArrayName = args[0].name
     // The string array can be found by its binding
     const bind = path.scope.getBinding(obj.stringArrayName)
+    if (!bind) {
+      console.error(`Cannot find binding for: ${obj.stringArrayName}`)
+      obj.stringArrayName = null
+      return
+    }
     const def = t.variableDeclaration('var', [bind.path.node])
     obj.stringArrayCodes.push(generator(def, optGenMin).code)
     // The calls can be found by its references
@@ -643,67 +657,49 @@ function standardLoop(path) {
   }
 }
 
+function FormatMember(path) {
+  let curNode = path.node
+  if (!t.isStringLiteral(curNode.property)) {
+    return
+  }
+  if (curNode.computed === undefined || !curNode.computed === true) {
+    return
+  }
+  if (!/^[a-zA-Z_$][0-9a-zA-Z_$]*$/.test(curNode.property.value)) {
+    return
+  }
+  curNode.property = t.identifier(curNode.property.value)
+  curNode.computed = false
+}
+
+function FormatMethodOrProperty(path) {
+  let curNode = path.node
+  if (!t.isStringLiteral(curNode.key)) {
+    return
+  }
+  curNode.computed = false
+  if (/^[a-zA-Z_$][0-9a-zA-Z_$]*$/.test(curNode.key.value)) {
+    curNode.key = t.identifier(curNode.key.value)
+  }
+}
+
 function purifyCode(ast) {
   // 标准化if语句
   traverse(ast, lintIfStatement)
   traverse(ast, pruneIfBranch)
-  // 标准化for语句
-  traverse(ast, { ForStatement: standardLoop })
-  // 标准化while语句
-  traverse(ast, { WhileStatement: standardLoop })
-  // 删除空语句
+  // 合并: 标准化循环语句 + 删除空语句 + 替换索引器 + 替换计算属性
   traverse(ast, {
+    ForStatement: standardLoop,
+    WhileStatement: standardLoop,
     EmptyStatement: (path) => {
       path.remove()
     },
+    MemberExpression: FormatMember,
+    'Method|Property': FormatMethodOrProperty,
   })
   traverse(ast, splitAssignment)
   // 删除未使用的变量
   traverse(ast, deleteUnusedVar)
-  // 替换索引器
-  function FormatMember(path) {
-    let curNode = path.node
-    if (!t.isStringLiteral(curNode.property)) {
-      return
-    }
-    if (curNode.computed === undefined || !curNode.computed === true) {
-      return
-    }
-    if (!/^[a-zA-Z_$][0-9a-zA-Z_$]*$/.test(curNode.property.value)) {
-      return
-    }
-    curNode.property = t.identifier(curNode.property.value)
-    curNode.computed = false
-  }
-  traverse(ast, { MemberExpression: FormatMember })
-
-  // 替换类和对象的计算方法和计算属性
-  // ["method"](){} -> "method"(){}
-  function FormatComputed(path) {
-    let curNode = path.node
-    if (!t.isStringLiteral(curNode.key)) {
-      return
-    }
-    curNode.computed = false
-  }
-  // "method"(){} -> method(){}
-  function stringLiteralToIdentifier(path) {
-    let curNode = path.node
-    if (!t.isStringLiteral(curNode.key) || curNode.computed === true) {
-      return
-    }
-    if (!/^[a-zA-Z_$][0-9a-zA-Z_$]*$/.test(curNode.key.value)) {
-      return
-    }
-    curNode.key = t.identifier(curNode.key.value)
-  }
-  traverse(ast, {
-    'Method|Property': (path) => {
-      FormatComputed(path)
-      stringLiteralToIdentifier(path)
-    },
-  })
-
   // 拆分语句
   traverse(ast, splitSequence)
   return ast
@@ -915,14 +911,14 @@ export default function (code) {
     console.error(`Cannot parse code: ${e.reasonCode}`)
     return null
   }
-  // IllegalReturn
-  traverse(ast, deleteIllegalReturn)
-  // Lint before split statements
-  traverse(ast, lintIfStatement)
-  // Split declarations to avoid bugs
-  traverse(ast, splitVarDeclaration)
-  // 清理二进制显示内容
+  // 合并: IllegalReturn + Lint + 清理二进制显示
   traverse(ast, {
+    ReturnStatement(path) {
+      if (!path.getFunctionParent()) {
+        path.remove()
+      }
+    },
+    IfStatement: { exit: lintIfStatement.IfStatement.exit },
     StringLiteral: ({ node }) => {
       delete node.extra
     },
@@ -930,29 +926,58 @@ export default function (code) {
       delete node.extra
     },
   })
+  // Split declarations to avoid bugs
+  traverse(ast, splitVarDeclaration)
+  // Rebuild scope once after all splits (instead of per-split)
+  traverse(ast, {
+    Program(path) {
+      path.scope.crawl()
+      path.stop()
+    },
+  })
   console.log('还原数值...')
   if (!decodeObject(ast)) {
     return null
   }
+  tryGC()
+  // Ensure scope is fully rebuilt before global decode
+  traverse(ast, {
+    Program(path) {
+      path.scope.crawl()
+      path.stop()
+    },
+  })
   console.log('处理全局加密...')
   if (!decodeGlobal(ast)) {
     return null
   }
+  tryGC()
   console.log('提高代码可读性...')
   ast = purifyCode(ast)
+  tryGC()
   console.log('处理代码块加密...')
   stringArrayLite(ast)
   ast = decodeCodeBlock(ast)
+  tryGC()
   console.log('清理死代码...')
   ast = cleanDeadCode(ast)
-  // 刷新代码
-  ast = parse(generator(ast, optGenMin).code, { errorRecovery: true })
+  tryGC()
+  // 刷新代码：拆分为多步以降低峰值内存
+  console.log('刷新代码...')
+  code = generator(ast, optGenMin).code
+  ast = null
+  tryGC()
+  ast = parse(code, { errorRecovery: true })
+  code = null
+  tryGC()
   console.log('提高代码可读性...')
   ast = purifyCode(ast)
   console.log('解除环境限制...')
   ast = unlockEnv(ast)
   console.log('净化完成')
   code = generator(ast, { jsescOption: { minimal: true } }).code
+  ast = null
+  tryGC()
   if (global_eval) {
     code = PluginEval.pack(code)
   }

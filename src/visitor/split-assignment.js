@@ -60,7 +60,6 @@ function procAssignment(path) {
   }
   insertPath.insertBefore(t.expressionStatement(path.node))
   path.replaceWith(path.node.left)
-  insertPath.scope.crawl()
 }
 
 /**

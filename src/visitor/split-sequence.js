@@ -7,7 +7,6 @@ function doSplit(insertPath, path) {
     insertPath.insertBefore(t.expressionStatement(expressions.shift()))
   }
   path.replaceWith(lastExpression)
-  insertPath.scope.crawl()
 }
 
 function splitSequence(path) {
